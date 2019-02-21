@@ -79,7 +79,7 @@ class RenderFont(object):
         Also, outputs ground-truth bounding boxes and text string
     """
 
-    def __init__(self, data_dir='data'):
+    def __init__(self, data_dir='data', text_source='product_codes/products_with_prices.txt'):
         # distribution over the type of text:
         # whether to get a single word, paragraph or a line:
         self.p_text = {0.0 : 'WORD',
@@ -91,18 +91,18 @@ class RenderFont(object):
         self.max_shrink_trials = 5 # 0.9^5 ~= 0.6
         # the minimum number of characters that should fit in a mask
         # to define the maximum font height.
-        self.min_nchar = 2
-        self.min_font_h = 16 #px : 0.6*12 ~ 7px <= actual minimum height
-        self.max_font_h = 120 #px
+        self.min_nchar = 1 
+        self.min_font_h = 7 #px : 0.6*12 ~ 7px <= actual minimum height
+        self.max_font_h = 20 #px
         self.p_flat = 0.10
 
         # curved baseline:
-        self.p_curved = 1.0
+        self.p_curved = 0.0
         self.baselinestate = BaselineState()
 
         # text-source : gets english text:
         self.text_source = TextSource(min_nchar=self.min_nchar,
-                                      fn=osp.join(data_dir,'newsgroup/newsgroup.txt'))
+                                      fn=osp.join(data_dir,text_source))
 
         # get font-state object:
         self.font_state = FontState(data_dir)
@@ -141,12 +141,16 @@ class RenderFont(object):
                 if ch.isspace(): # just shift
                     x += space.width
                 else:
+                    if ch == '.':
+                        x ++ space.width / 2
                     # render the character
                     ch_bounds = font.render_to(surf, (x,y), ch)
                     ch_bounds.x = x + ch_bounds.x
                     ch_bounds.y = y - ch_bounds.y
                     x += ch_bounds.width
                     bbs.append(np.array(ch_bounds))
+                    if ch == '.':
+                        x += space.width / 2
 
         # get the union of characters for cropping:
         r0 = pygame.Rect(bbs[0])
@@ -169,10 +173,9 @@ class RenderFont(object):
         wl = len(word_text)
         isword = len(word_text.split())==1
 
+        
         # do curved iff, the length of the word <= 10
-        if not isword or wl > 10 or np.random.rand() > self.p_curved:
-            return self.render_multiline(font, word_text)
-
+        return self.render_multiline(font, word_text)
         # create the surface:
         lspace = font.get_sized_height() + 1
         lbound = font.get_rect(word_text)
@@ -248,17 +251,16 @@ class RenderFont(object):
         return surf_arr, word_text, bbs
 
 
-    def get_nline_nchar(self,mask_size,font_height,font_width):
+    def get_nline_nchar(self,H,W,font_height,font_width):
         """
         Returns the maximum number of lines and characters which can fit
         in the MASK_SIZED image.
         """
-        H,W = mask_size
         nline = int(np.ceil(H/(2*font_height)))
         nchar = int(np.floor(W/font_width))
         return nline,nchar
 
-    def place_text(self, text_arrs, back_arr, bbs):
+    def place_text(self, text_arrs, back_arr, bbs, H, W):
         areas = [-np.prod(ta.shape) for ta in text_arrs]
         order = np.argsort(areas)
 
@@ -271,12 +273,34 @@ class RenderFont(object):
             intersect = ssig.fftconvolve(ba,ta[::-1,::-1],mode='valid')
             safemask = intersect < 1e8
 
+
             if not np.any(safemask): # no collision-free position:
                 #warn("COLLISION!!!")
                 return back_arr,locs[:i],bbs[:i],order[:i]
 
             minloc = np.transpose(np.nonzero(safemask))
-            loc = minloc[np.random.choice(minloc.shape[0]),:]
+
+            w, h = text_arrs[i].shape
+
+            safemask = ba != 1e8
+            last_valid_index = safemask.cumsum(axis=1).argmax(axis=1)
+            first_valid_index = (safemask.cumsum(axis=1) == 1).argmax(axis=1)
+            j = 0
+            while j < len(minloc):
+                this_width = last_valid_index[minloc[j][0]] - first_valid_index[minloc[j][0]]
+                if this_width < w:
+                    j += 1
+                else:
+                    gap_on_each_side = (this_width - w) / 2
+
+                    if np.abs((minloc[j][1] - first_valid_index[minloc[j][0]]) - gap_on_each_side) < 5:
+                        loc = minloc[j]
+                        break
+                    else:
+                        j += 1
+            if j == len(minloc):
+                return  back_arr,locs[:i],bbs[:i],order[:i]
+
             locs[i] = loc
 
             # update the bounding-boxes:
@@ -284,6 +308,7 @@ class RenderFont(object):
 
             # blit the text onto the canvas
             w,h = text_arrs[i].shape
+            
             out_arr[loc[0]:loc[0]+w,loc[1]:loc[1]+h] += text_arrs[i]
 
         return out_arr, locs, bbs, order
@@ -320,7 +345,7 @@ class RenderFont(object):
         return coords
 
 
-    def render_sample(self,font,mask):
+    def render_sample(self,font,mask, place_price):
         """
         Places text in the "collision-free" region as indicated
         in the mask -- 255 for unsafe, 0 for safe.
@@ -328,11 +353,24 @@ class RenderFont(object):
         """
         #H,W = mask.shape
         H,W = self.robust_HW(mask)
+        # print(H,W)
         f_asp = self.font_state.get_aspect_ratio(font)
-
+        # print(f_asp)
         # find the maximum height in pixels:
-        max_font_h = min(0.9*H, (1/f_asp)*W/(self.min_nchar+1))
-        max_font_h = min(max_font_h, self.max_font_h)
+
+        # import pdb; pdb.set_trace()
+        #print(mask)
+        first_valid_placement = (mask == 0).any(axis=1).argmax()
+        last_valid_placement = (mask == 0).any(axis=1).cumsum().argmax()
+
+        H, W = self.robust_HW(mask[first_valid_placement:last_valid_placement,:]) 
+        if True:#place_price:
+            RECEIPT_WIDTH = 50
+            font_width = W / RECEIPT_WIDTH
+            max_font_h = font_width / f_asp
+        else:
+            max_font_h = min(0.9*H, (1/f_asp)*W/(self.min_nchar+1))
+            max_font_h = min(max_font_h, self.max_font_h)
         if max_font_h < self.min_font_h: # not possible to place any text here
             return #None
 
@@ -340,12 +378,12 @@ class RenderFont(object):
         ## TODO : change this to allow multiple text instances?
         i = 0
         while i < self.max_shrink_trials and max_font_h > self.min_font_h:
-            # if i > 0:
-            #     print colorize(Color.BLUE, "shrinkage trial : %d"%i, True)
-
             # sample a random font-height:
-            f_h_px = self.sample_font_height_px(self.min_font_h, max_font_h)
-            #print "font-height : %.2f (min: %.2f, max: %.2f)"%(f_h_px, self.min_font_h,max_font_h)
+            if place_price:
+                f_h_px = max_font_h * (1 - i*0.1)
+            else:
+                f_h_px = self.sample_font_height_px(self.min_font_h, max_font_h)
+            # print "font-height : %.2f (min: %.2f, max: %.2f)"%(f_h_px, self.min_font_h,max_font_h)
             # convert from pixel-height to font-point-size:
             f_h = self.font_state.get_font_size(font, f_h_px)
 
@@ -356,17 +394,24 @@ class RenderFont(object):
             font.size = f_h # set the font-size
 
             # compute the max-number of lines/chars-per-line:
-            nline,nchar = self.get_nline_nchar(mask.shape[:2],f_h,f_h*f_asp)
-            #print "  > nline = %d, nchar = %d"%(nline, nchar)
+            nline,nchar = self.get_nline_nchar(H,W,f_h,f_h*f_asp)
+
+            # print "  > nline = %d, nchar = %d"%(nline, nchar)
 
             assert nline >= 1 and nchar >= self.min_nchar
 
             # sample text:
+
             text_type = sample_weighted(self.p_text)
-            text = self.text_source.sample(nline,nchar,text_type)
-            if len(text)==0 or np.any([len(line)==0 for line in text]):
-                continue
-            #print colorize(Color.GREEN, text)
+            if place_price:
+                nline = int(min(nline - 1, max(np.random.normal(8,4), 2)))
+                text = self.text_source.get_lines_simple(nline)
+            else:
+                text = self.text_source.get_line_simple()
+                # text = self.text_source.sample(nline,nchar,text_type)
+                # if len(text)==0 or np.any([len(line)==0 for line in text]):
+                    # continue
+            # print colorize(Color.GREEN, text)
 
             # render the text:
             txt_arr,txt,bb = self.render_curved(font, text)
@@ -378,7 +423,7 @@ class RenderFont(object):
                 continue
 
             # position the text within the mask:
-            text_mask,loc,bb, _ = self.place_text([txt_arr], mask, [bb])
+            text_mask,loc,bb, _ = self.place_text([txt_arr], mask, [bb], H, W)
             if len(loc) > 0:#successful in placing the text collision-free:
                 return text_mask,loc[0],bb[0],text
         return #None
@@ -396,7 +441,7 @@ class FontState(object):
     """
     Defines the random state of the font rendering  
     """
-    size = [50, 10]  # normal dist mean, std
+    size = [15, 10]  # normal dist mean, std
     underline = 0.05
     strong = 0.5
     oblique = 0.2
@@ -462,26 +507,46 @@ class FontState(object):
         return m[0]*font_size_px + m[1] #linear model
 
 
-    def sample(self):
+    def sample(self, price=False):
         """
         Samples from the font state distribution
         """
-        return {
-            'font': self.fonts[int(np.random.randint(0, len(self.fonts)))],
-            'size': self.size[1]*np.random.randn() + self.size[0],
-            'underline': np.random.rand() < self.underline,
-            'underline_adjustment': max(2.0, min(-2.0, self.underline_adjustment[1]*np.random.randn() + self.underline_adjustment[0])),
-            'strong': np.random.rand() < self.strong,
-            'oblique': np.random.rand() < self.oblique,
-            'strength': (self.strength[1] - self.strength[0])*np.random.rand() + self.strength[0],
-            'char_spacing': int(self.kerning[3]*(np.random.beta(self.kerning[0], self.kerning[1])) + self.kerning[2]),
-            'border': np.random.rand() < self.border,
-            'random_caps': np.random.rand() < self.random_caps,
-            'capsmode': random.choice(self.capsmode),
-            'curved': np.random.rand() < self.curved,
-            'random_kerning': np.random.rand() < self.random_kerning,
-            'random_kerning_amount': self.random_kerning_amount,
-        }
+        if not price:
+            return {
+                'font': self.fonts[int(np.random.randint(0, len(self.fonts)))],
+                'size': np.maximum(10.0, self.size[1]*np.random.randn() + self.size[0]),
+                'underline': False, #np.random.rand() < self.underline,
+                'underline_adjustment': max(2.0, min(-2.0, self.underline_adjustment[1]*np.random.randn() + self.underline_adjustment[0])),
+                'strong': True, #np.random.rand() < self.strong,
+                'oblique': False, #np.random.rand() < self.oblique,
+                'strength': (self.strength[1] - self.strength[0])*np.random.rand() + self.strength[0],
+                'char_spacing': int(self.kerning[3]*(np.random.beta(self.kerning[0], self.kerning[1])) + self.kerning[2]),
+                'border': np.random.rand() < self.border,
+                'random_caps': False, #np.random.rand() < self.random_caps,
+                'capsmode': str.upper, #random.choice(self.capsmode),
+                'curved': False,# np.random.rand() < self.curved,
+                'random_kerning': False,# np.random.rand() < self.random_kerning,
+                'random_kerning_amount': self.random_kerning_amount,
+            }
+        else:
+            return {
+                    'font': self.fonts[int(np.random.randint(0, len(self.fonts)))],
+                    'size': np.maximum(10.0, self.size[1]*np.random.randn() + self.size[0]),
+                    'underline': False,
+                    'underline_adjustment': max(2.0, min(-2.0, self.underline_adjustment[1]*np.random.randn() + self.underline_adjustment[0])),
+                    'strong': False,
+                    'oblique': False,
+                    'strength': (self.strength[1] - self.strength[0])*np.random.rand() + self.strength[0],
+                    'char_spacing': 1,#int(self.kerning[3]*(np.random.beta(self.kerning[0], self.kerning[1])) + self.kerning[2]),
+                    'border': False,#np.random.rand() < self.border,
+                    'random_caps': False,
+                    'capsmode': str.upper,
+                    'curved': False,
+                    'random_kerning': False, #np.random.rand() < self.random_kerning,
+                    'random_kerning_amount': self.random_kerning_amount,
+                }
+
+
 
     def init_font(self,fs):
         """
@@ -515,6 +580,9 @@ class TextSource(object):
 
         with open(fn,'r') as f:
             self.txt = [l.strip() for l in f.readlines()]
+        
+        with open('data/product_codes/categories.txt','r') as f:
+            self.categories = [l.strip() for l in f.readlines()]
 
         # distribution over line/words for LINE/PARA:
         self.p_line_nline = np.array([0.85, 0.10, 0.05])
@@ -523,8 +591,14 @@ class TextSource(object):
         self.p_para_nword = [1.7,3.0,10] # beta: (a,b), max_nword
 
         # probability to center-align a paragraph:
-        self.center_para = 0.5
+        self.center_para = 0.0
 
+    def get_lines_simple(self, num_lines):
+        rand = np.random.randint(0, len(self.txt), num_lines)
+        return '\n'.join([self.txt[x] for x in rand])
+
+    def get_line_simple(self):
+        return np.random.choice(self.categories)
 
     def check_symb_frac(self, txt, f=0.35):
         """

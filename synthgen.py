@@ -1,4 +1,3 @@
-# Author: Ankush Gupta
 # Date: 2015
 
 """
@@ -21,7 +20,9 @@ import text_utils as tu
 from colorize3_poisson import Colorize
 from common import *
 import traceback, itertools
-
+import bdb
+import sys
+import StringIO
 
 class TextRegions(object):
     """
@@ -78,7 +79,7 @@ class TextRegions(object):
 
             coords = np.c_[xs,ys].astype('float32')
             rect = cv2.minAreaRect(coords)          
-            box = np.array(cv2.cv.BoxPoints(rect))
+            box = np.array(cv2.boxPoints(rect))
             h,w,rot = TextRegions.get_hw(box,return_rot=True)
 
             f = (h > TextRegions.minHeight 
@@ -215,9 +216,9 @@ def get_text_placement_mask(xyz,mask,plane,pad=2,viz=False):
     REGION : DICT output of TextRegions.get_regions
     PAD : number of pixels to pad the placement-mask by
     """
-    contour,hier = cv2.findContours(mask.copy().astype('uint8'),
-                                    mode=cv2.cv.CV_RETR_CCOMP,
-                                    method=cv2.cv.CV_CHAIN_APPROX_SIMPLE)
+    img, contour,hier = cv2.findContours(mask.copy().astype('uint8'),
+                                    mode=cv2.RETR_CCOMP,
+                                    method=cv2.CHAIN_APPROX_SIMPLE)
     contour = [np.squeeze(c).astype('float') for c in contour]
     #plane = np.array([plane[1],plane[0],plane[2],plane[3]])
     H,W = mask.shape[:2]
@@ -236,7 +237,7 @@ def get_text_placement_mask(xyz,mask,plane,pad=2,viz=False):
 
     # unrotate in 2D plane:
     rect = cv2.minAreaRect(pts_fp[0].copy().astype('float32'))
-    box = np.array(cv2.cv.BoxPoints(rect))
+    box = np.array(cv2.boxPoints(rect))
     R2d = su.unrotate2d(box.copy())
     box = np.vstack([box,box[0,:]]) #close the box for visualization
 
@@ -260,7 +261,7 @@ def get_text_placement_mask(xyz,mask,plane,pad=2,viz=False):
 
     pts_fp_i32 = [(pts_fp[i]+minxy[None,:]).astype('int32') for i in xrange(len(pts_fp))]
     cv2.drawContours(place_mask,pts_fp_i32,-1,0,
-                     thickness=cv2.cv.CV_FILLED,
+                     thickness=cv2.FILLED,
                      lineType=8,hierarchy=hier)
     
     if not TextRegions.filter_rectified((~place_mask).astype('float')/255):
@@ -375,6 +376,20 @@ class RendererV3(object):
         self.max_text_regions = 7
 
         self.max_time = max_time
+	self.jpeg_qual_min = 90
+        self.jpeg_qual_max = 100
+
+    def random_jpeg_compression(self, rgb):
+        buffer = StringIO.StringIO()
+        im1 = Image.fromarray(rgb)
+        jpeg_compression = np.random.randint(self.jpeg_qual_min, self.jpeg_qual_max)
+        if jpeg_compression:
+            print(jpeg_compression)
+            im1.save(buffer, "JPEG", quality=jpeg_compression)
+            aa = np.array(Image.open(buffer))
+            return aa
+        else:
+            return rgb
 
     def filter_regions(self,regions,filt):
         """
@@ -389,6 +404,8 @@ class RendererV3(object):
         filt = np.zeros(len(regions['label'])).astype('bool')
         masks,Hs,Hinvs = [],[], []
         for idx,l in enumerate(regions['label']):
+            if l != 2:
+                continue
             res = get_text_placement_mask(xyz,seg==l,regions['coeff'][idx],pad=2)
             if res is not None:
                 mask,H,Hinv = res
@@ -494,18 +511,24 @@ class RendererV3(object):
             ksz = 5
         return cv2.GaussianBlur(text_mask,(ksz,ksz),bsz)
 
-    def place_text(self,rgb,collision_mask,H,Hinv):
-        font = self.text_renderer.font_state.sample()
+    def place_text(self,rgb,collision_mask,H,Hinv, price):
+        
+        font = self.text_renderer.font_state.sample(price)
         font = self.text_renderer.font_state.init_font(font)
 
-        render_res = self.text_renderer.render_sample(font,collision_mask)
+        render_res = self.text_renderer.render_sample(font,collision_mask, price)
         if render_res is None: # rendering not successful
             return #None
         else:
             text_mask,loc,bb,text = render_res
-
         # update the collision mask with text:
-        collision_mask += (255 * (text_mask>0)).astype('uint8')
+
+        first_text_row = ((text_mask > 0).any(axis=1).cumsum() == 1).argmax()
+        last_text_row = (text_mask > 0).any(axis=1).cumsum().argmax()
+
+        text_mask_coll_padded = text_mask.copy()
+        text_mask_coll_padded[0:last_text_row + 10,:] = 1
+        collision_mask += (255 * (text_mask_coll_padded>0)).astype('uint8')
 
         # warp the object mask back onto the image:
         text_mask_orig = text_mask.copy()
@@ -559,7 +582,7 @@ class RendererV3(object):
             # change shape from 2x4xn_i -> (4*n_i)x2
             cc = np.squeeze(np.concatenate(np.dsplit(cc,cc.shape[-1]),axis=1)).T.astype('float32')
             rect = cv2.minAreaRect(cc.copy())
-            box = np.array(cv2.cv.BoxPoints(rect))
+            box = np.array(cv2.boxPoints(rect))
 
             # find the permutation of box-coordinates which
             # are "aligned" appropriately with the character-bb.
@@ -608,7 +631,6 @@ class RendererV3(object):
         try:
             # depth -> xyz
             xyz = su.DepthCamera.depth2xyz(depth)
-            
             # find text-regions:
             regions = TextRegions.get_regions(xyz,seg,area,label)
 
@@ -634,7 +656,7 @@ class RendererV3(object):
             idict = {'img':[], 'charBB':None, 'wordBB':None, 'txt':None}
 
             m = self.get_num_text_regions(nregions)#np.arange(nregions)#min(nregions, 5*ninstance*self.max_text_regions))
-            reg_idx = np.arange(min(2*m,nregions))
+            reg_idx = np.arange(min(2 * m, nregions))
             np.random.shuffle(reg_idx)
             reg_idx = reg_idx[:m]
 
@@ -645,28 +667,37 @@ class RendererV3(object):
 
             # process regions: 
             num_txt_regions = len(reg_idx)
-            NUM_REP = 5 # re-use each region three times:
+            NUM_REP = 30 # re-use each region three times:
             reg_range = np.arange(NUM_REP * num_txt_regions) % num_txt_regions
+
+            price = False
             for idx in reg_range:
                 ireg = reg_idx[idx]
                 try:
                     if self.max_time is None:
                         txt_render_res = self.place_text(img,place_masks[ireg],
                                                          regions['homography'][ireg],
-                                                         regions['homography_inv'][ireg])
+                                                         regions['homography_inv'][ireg],
+                                                         price)
                     else:
                         with time_limit(self.max_time):
                             txt_render_res = self.place_text(img,place_masks[ireg],
                                                              regions['homography'][ireg],
-                                                             regions['homography_inv'][ireg])
+                                                             regions['homography_inv'][ireg],
+                                                             price)
+                            if txt_render_res is None:
+                                continue
                 except TimeoutException, msg:
                     print msg
                     continue
+                except bdb.BdbQuit:
+                    sys.exit(1)
+                except KeyboardInterrupt:
+                    sys.exit(1)
                 except:
                     traceback.print_exc()
-                    # some error in placing text on the region
                     continue
-
+                
                 if txt_render_res is not None:
                     placed = True
                     img,text,bb,collision_mask = txt_render_res
@@ -675,10 +706,10 @@ class RendererV3(object):
                     # store the result:
                     itext.append(text)
                     ibb.append(bb)
-
+                    price = not price
             if  placed:
                 # at least 1 word was placed in this instance:
-                idict['img'] = img
+                idict['img'] = self.random_jpeg_compression(img)
                 idict['txt'] = itext
                 idict['charBB'] = np.concatenate(ibb, axis=2)
                 idict['wordBB'] = self.char2wordBB(idict['charBB'].copy(), ' '.join(itext))
@@ -689,4 +720,5 @@ class RendererV3(object):
                     # viz_regions(rgb.copy(),xyz,seg,regions['coeff'],regions['label'])
                     if i < ninstance-1:
                         raw_input(colorize(Color.BLUE,'continue?',True))                    
+
         return res
