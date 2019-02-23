@@ -1,0 +1,2 @@
+receipt_fonts/receipt3.ttf
+receipt_fonts/receipt9.ttf

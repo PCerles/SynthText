@@ -1,0 +1,8 @@
+receipt_fonts/receipt3.ttf
+receipt_fonts/receipt7.ttf
+receipt_fonts/receipt0.ttf
+receipt_fonts/receipt4.ttf
+receipt_fonts/receipt9.ttf
+receipt_fonts/receipt5.ttf
+receipt_fonts/receipt8.ttf
+receipt_fonts/receipt1.ttf
