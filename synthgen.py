@@ -205,7 +205,7 @@ def rescale_frontoparallel(p_fp,box_fp,p_im):
         s = 1.0
     return s
 
-def get_text_placement_mask(xyz,mask,plane,pad=2,viz=False):
+def get_text_placement_mask(xyz,mask,plane,pad=2,viz=True):
     """
     Returns a binary mask in which text can be placed.
     Also returns a homography from original image
@@ -376,7 +376,7 @@ class RendererV3(object):
         self.max_text_regions = 7
 
         self.max_time = max_time
-	self.jpeg_qual_min = 90
+        self.jpeg_qual_min = 80
         self.jpeg_qual_max = 100
 
     def random_jpeg_compression(self, rgb):
@@ -518,6 +518,7 @@ class RendererV3(object):
 
         render_res = self.text_renderer.render_sample(font,collision_mask, price)
         if render_res is None: # rendering not successful
+            print('render res not working')
             return #None
         else:
             text_mask,loc,bb,text = render_res
@@ -686,6 +687,7 @@ class RendererV3(object):
                                                              regions['homography_inv'][ireg],
                                                              price)
                             if txt_render_res is None:
+                                print('text not placed')
                                 continue
                 except TimeoutException, msg:
                     print msg

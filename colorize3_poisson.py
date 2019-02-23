@@ -148,10 +148,10 @@ class Colorize(object):
         self.font_color = FontColor(col_file=osp.join(model_dir,'models/colors_old.cp'))
 
         # probabilities of different text-effects:
-        self.p_bevel = 0.05 # add bevel effect to text
-        self.p_outline = 0.05 # just keep the outline of the text
+        self.p_bevel = 0#0.05 # add bevel effect to text
+        self.p_outline = 0#0.05 # just keep the outline of the text
         self.p_drop_shadow = 0#0.15
-        self.p_border = 0.15
+        self.p_border = 0# 0.15
         self.p_displacement = 0.30 # add background-based bump-mapping
         self.p_texture = 0.0 # use an image for coloring text
 

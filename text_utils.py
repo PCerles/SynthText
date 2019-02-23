@@ -142,7 +142,7 @@ class RenderFont(object):
                     x += space.width
                 else:
                     if ch == '.':
-                        x ++ space.width / 2
+                        x += space.width / 4
                     # render the character
                     ch_bounds = font.render_to(surf, (x,y), ch)
                     ch_bounds.x = x + ch_bounds.x
@@ -293,7 +293,7 @@ class RenderFont(object):
                 else:
                     gap_on_each_side = (this_width - w) / 2
 
-                    if np.abs((minloc[j][1] - first_valid_index[minloc[j][0]]) - gap_on_each_side) < 5:
+                    if np.abs((minloc[j][1] - first_valid_index[minloc[j][0]]) - gap_on_each_side) < 100:
                         loc = minloc[j]
                         break
                     else:
@@ -404,7 +404,7 @@ class RenderFont(object):
 
             text_type = sample_weighted(self.p_text)
             if place_price:
-                nline = int(min(nline - 1, max(np.random.normal(8,4), 2)))
+                nline = int(min(nline - 1, max(np.random.normal(4,2), 2)))
                 text = self.text_source.get_lines_simple(nline)
             else:
                 text = self.text_source.get_line_simple()
