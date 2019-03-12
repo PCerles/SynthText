@@ -13,9 +13,51 @@ import argparse
 import h5py
 import os
 from tqdm import tqdm
-
+import StringIO
+import io
+from pyblur import RandomizedBlur, LinearMotionBlur, DefocusBlur
+from PIL import Image
+import math
 parser = argparse.ArgumentParser()
-parser.add_argument('--out-file', type=str)
+parser.add_argument('--out-dir', type=str)
+parser.add_argument('--im-resize-factor', default=1, type=int)
+
+def randomAngle(kerneldim):
+    """Returns a random angle used to produce motion blurring
+
+    Args:
+        kerneldim (int): size of the kernel used in motion blurring
+
+    Returns:
+        int: Random angle
+    """
+    kernelCenter = int(math.floor(kerneldim/2))
+    numDistinctLines = kernelCenter * 4
+    validLineAngles = np.linspace(0,180, numDistinctLines, endpoint = False)
+    angleIdx = np.random.randint(0, len(validLineAngles))
+    return int(validLineAngles[angleIdx])
+
+def PIL2array1C(img):
+    '''Converts a PIL image to NumPy Array
+
+    Args:
+        img(PIL Image): Input PIL image
+    Returns:
+        NumPy Array: Converted image
+    '''
+    return np.array(img.getdata(),
+                    np.uint8).reshape(img.size[1], img.size[0])
+
+def PIL2array3C(img):
+    '''Converts a PIL image to NumPy Array
+
+    Args:
+        img(PIL Image): Input PIL image
+    Returns:
+        NumPy Array: Converted image
+    '''
+    return np.array(img.getdata(),
+                    np.uint8).reshape(img.size[1], img.size[0], 3)
 
 def ims(img):
     imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
@@ -34,18 +76,70 @@ def bb_xywh2coords(bbs):
             coords[1,3,i] += bbs[i,3]
         return coords
 
+def DefocusBlur3C(img):
+    """Performs motion blur on an image with 3 channels. Used to simulate
+       blurring caused due to motion of camera.
+
+    Args:
+        img(NumPy Array): Input image with 3 channels
+
+    Returns:
+        Image: Blurred image by applying a motion blur with random parameters
+    """
+    defocusKernelDims = [3]
+    kernelidx = np.random.randint(0, len(defocusKernelDims))    
+    kerneldim = defocusKernelDims[kernelidx]
+    blurred_img = img
+    for i in range(3):
+        blurred_img[:,:,i] = PIL2array1C(DefocusBlur(img[:,:,i], kerneldim))
+    blurred_img = Image.fromarray(blurred_img, 'RGB')
+    return blurred_img
+
+def LinearMotionBlur3C(img):
+    """Performs motion blur on an image with 3 channels. Used to simulate
+       blurring caused due to motion of camera.
+
+    Args:
+        img(NumPy Array): Input image with 3 channels
+
+    Returns:
+        Image: Blurred image by applying a motion blur with random parameters
+    """
+    lineLengths = [3,5]
+    lineTypes = ["right", "left", "full"]
+    lineLengthIdx = np.random.randint(0, len(lineLengths))
+    lineTypeIdx = np.random.randint(0, len(lineTypes))
+    lineLength = lineLengths[lineLengthIdx]
+    lineType = lineTypes[lineTypeIdx]
+    lineAngle = randomAngle(lineLength)
+    blurred_img = img
+    for i in range(3):
+        blurred_img[:,:,i] = PIL2array1C(LinearMotionBlur(img[:,:,i], lineLength, lineAngle, lineType))
+    blurred_img = Image.fromarray(blurred_img, 'RGB')
+    return blurred_img
+
+def applyRandomBlur(img):
+    blur = random.choice([LinearMotionBlur3C])
+    if np.random.rand() < 0.5:
+        print(blur)
+        return blur(img)
+    else:
+        return img
+
 class ReceiptGenerator:
     def __init__(self):
-        with open('data/product_codes/products_with_prices.txt', 'r') as f:
+        with open('data/product_codes/products_with_prices_and_qty.txt', 'r') as f:
             self.prod_prices = f.read().strip().split('\n')
         with open('data/product_codes/categories.txt', 'r') as f:
             self.categories = f.read().strip().split('\n')
-        with open('data/product_codes/products_with_prices_member.txt', 'r') as f:
+        with open('data/product_codes/products_with_prices_member_offset.txt', 'r') as f:
             self.prod_prices_member = f.read().strip().split('\n')
-
+        for l in [self.prod_prices, self.categories, self.prod_prices_member]:
+            for i in range(len(l)):
+                l[i] = l[i].decode("ascii", "ignore")
     def get_receipt(self, num_lines):
         
-        member = random.random() < .8
+        member = random.random() < .6
 
         num_categories = min(num_lines // 4, len(self.categories))
         num_product_prices = num_lines - (2 * num_categories)
@@ -56,7 +150,6 @@ class ReceiptGenerator:
             random_start = np.random.randint(0, len(self.prod_prices_member) - num_lines)
             all_lines = self.prod_prices_member[random_start:random_start+num_lines]
         else:
-
             random_start = np.random.randint(0, len(self.prod_prices) - num_lines)
             all_lines = self.prod_prices[random_start:random_start+num_lines]
         if num_categories == 1:
@@ -96,7 +189,7 @@ class ReceiptGenerator:
         y = 0
         
         words = []
-        
+        random_price_kerning = np.random.uniform(0, char_width / 2) 
         for section, prices in receipt_fields:
             # place section
             x = full_width / 2 - (len(section) // 2) * char_width
@@ -105,13 +198,11 @@ class ReceiptGenerator:
             words.append(section)
             
             font.strong = True
-            y, bbs, surf = place_lines([section], font, surf, bbs, x, y, char_width, line_spacing, True)
+            y, bbs, surf = place_lines([section], font, surf, bbs, x, y, char_width, line_spacing, True, random_price_kerning)
             font.strong = False
-            x = char_width * 10
+            x = char_width * 4
             y += line_spacing
-        
-            y, bbs, surf = place_lines(prices, font, surf, bbs, x, y, char_width, line_spacing, False)
-            
+            y, bbs, surf = place_lines(prices, font, surf, bbs, x, y, char_width, line_spacing, False, random_price_kerning)
             words.extend(prices)
 
         r0 = pygame.Rect(bbs[0])
@@ -123,7 +214,7 @@ class ReceiptGenerator:
         surf_arr = surf_arr.swapaxes(0,1)
         return surf_arr, words, bbs, '\n'.join(words)
     
-def place_lines(lines, font, surf, bbs, default_x, y, char_width, line_spacing, is_title):
+def place_lines(lines, font, surf, bbs, default_x, y, char_width, line_spacing, is_title, random_price_kerning):
     for l in lines:
         if not is_title:
             font.strong = False
@@ -137,11 +228,15 @@ def place_lines(lines, font, surf, bbs, default_x, y, char_width, line_spacing, 
             if ch.isspace(): # just shift
                 x += char_width
             else:
+                if ch == '.':
+                    x += random_price_kerning
                 ch_bounds = font.render_to(surf, (x,y), ch)
                 ch_bounds.x = x + ch_bounds.x
                 ch_bounds.y = y - ch_bounds.y
 
                 x += char_width
+                if ch == '.':
+                    x += random_price_kerning
                 bbs.append(np.array(ch_bounds))
     return y, bbs, surf
 
@@ -159,21 +254,45 @@ def add_res(imgname,res, i):
     """
     name = imgname.split('.')[0] + '_' + str(i).zfill(4) + '.jpeg'
     img = res['img']
+    text = res['txt']
+
+    cv2_im = cv2.cvtColor(img,cv2.COLOR_BGR2RGB)
+    pil_im = Image.fromarray(cv2_im)
+    pil_im = applyRandomBlur(PIL2array3C(pil_im))
+    cv2_im = cv2.cvtColor(np.array(pil_im), cv2.COLOR_RGB2BGR)
+
+    jpeg_compression_quality = np.random.randint(80, 100)
     reshaped = np.round(res['wordBB'].swapaxes(2, 0).reshape(-1, 8), 3)
-    cv2.imwrite('/data0/ocr/rot_boxes_v2/images/'+name, img)
-    np.savetxt('/data0/ocr/rot_boxes_v2/boxes/'+name.replace('.jpeg', '.txt'), reshaped, delimiter=",", fmt='%-10.5f')
+    cv2.imwrite(args.out_dir+'/images/'+name, cv2_im, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_compression_quality])
+    np.savetxt(args.out_dir+'/boxes/'+name.replace('.jpeg', '.txt'), reshaped, delimiter=",", fmt='%-10.5f')
+    with open(args.out_dir+'/text/'+name.replace('.jpeg','.txt'), 'w') as f:
+        for i in range(len(text)):
+            f.write(text[i].replace(' ', '\n'))
+            f.write('\n')
 
 if __name__ == '__main__':
+
     args = parser.parse_args()
+    try:
+        os.makedirs(args.out_dir+'/images/')
+        os.makedirs(args.out_dir+'/boxes')
+        os.makedirs(args.out_dir+'/text/')
+    except:
+        pass
 
     num_instances = 500
     planes = pd.read_csv('receipts_02_22/plane.txt', header=None)
     planes.columns = ['path','x','y','surf_num']
     planes = planes.groupby('path').filter(lambda x: len(x) % 4 == 0)
 
+    if args.im_resize_factor != 1:
+        print('WARNING RESIZING BOXES')
+    planes[['x','y']] = planes[['x','y']] // args.im_resize_factor
+
     masks = pd.read_csv('receipts_02_22/mask.txt', header=None)
     masks.columns = ['path','x','y','surf_num']
     masks = masks[['path','x','y']]
+    masks[['x','y']] = masks[['x','y']] // args.im_resize_factor
 
     masks = masks.groupby('path')
 
@@ -184,8 +303,14 @@ if __name__ == '__main__':
     receipt_gen = ReceiptGenerator()
     RV3 = RendererV3('data/')
     for name, grp in tqdm(planes.groupby('path')):
-        orig_img = cv2.imread(name)
         imname = os.path.basename(name) 
+
+        if imname in ['IMG_1185.JPG', 'IMG_1182.JPG']:
+            continue
+        print(imname)
+        print(name)
+        orig_img = cv2.imread(name)
+        orig_img = cv2.resize(orig_img, (int(orig_img.shape[1] // args.im_resize_factor), int(orig_img.shape[0] // args.im_resize_factor)))
         if name in masks.groups.keys():
             mask = masks.get_group(name)
             continue
@@ -254,8 +379,6 @@ if __name__ == '__main__':
                     text_mask = get_mask_transform(mask, text_mask)
 
                 img = RV3.colorizer.color(img,[text_mask],np.array([min_h]))
-                cv2.imwrite('checking/'+name.split('/')[1], img)
-                
                 itext.append(text)
                 ibb.append(bb)
             
